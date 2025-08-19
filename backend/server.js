@@ -1,6 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const yahooFinance = require('yahoo-finance2').default;
+const path = require('path');
+const { spawn } = require('child_process');
+const https = require('https');
 require('dotenv').config();
 
 const app = express();
@@ -348,6 +351,369 @@ app.get('/api/analysis/:symbol', async (req, res) => {
     } catch (error) {
         console.error('Error in /api/analysis:', error);
         res.status(500).json({ error: 'Failed to analyze stock' });
+    }
+});
+
+// Helper: simple https GET returning parsed JSON (no extra deps)
+function fetchJSON(url) {
+    return new Promise((resolve, reject) => {
+        https
+            .get(url, (resp) => {
+                let data = '';
+                resp.on('data', (chunk) => (data += chunk));
+                resp.on('end', () => {
+                    try {
+                        const json = JSON.parse(data);
+                        resolve(json);
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+            })
+            .on('error', (err) => reject(err));
+    });
+}
+
+// Indian stocks via Moneycontrol (Python integration)
+app.get('/api/in/stocks/:query', async (req, res) => {
+    try {
+        const raw = (req.params.query || '').trim();
+        if (!raw) return res.status(400).json({ error: 'Missing query' });
+
+        const scriptPath = path.join(__dirname, 'scripts', 'indian_stock.py');
+        const py = spawn(process.env.PYTHON_BIN || 'python', [scriptPath, raw], {
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        let stdout = '';
+        let stderr = '';
+        const timer = setTimeout(() => {
+            try { py.kill('SIGKILL'); } catch {}
+        }, 15000);
+
+        py.stdout.on('data', (d) => (stdout += d.toString()));
+        py.stderr.on('data', (d) => (stderr += d.toString()));
+
+        py.on('close', (code) => {
+            clearTimeout(timer);
+            try {
+                const data = JSON.parse(stdout.trim());
+                if (!data || data.error) {
+                    return res.status(404).json({ error: data?.error || 'Stock not found' });
+                }
+                return res.json(data);
+            } catch (e) {
+                console.error('Moneycontrol parse error:', e, 'stderr:', stderr);
+                return res.status(500).json({ error: 'Failed to fetch Indian stock via Moneycontrol' });
+            }
+        });
+    } catch (error) {
+        console.error('Error in /api/in/stocks:', error);
+        res.status(500).json({ error: 'Failed to fetch Indian stock' });
+    }
+});
+
+// Jobs data (Unemployment rate %) via World Bank API
+app.get('/api/jobs/:country', async (req, res) => {
+    try {
+        const c = (req.params.country || '').toLowerCase();
+        const iso3 = { in: 'IND', india: 'IND', us: 'USA', usa: 'USA' }[c];
+        if (!iso3) return res.status(400).json({ error: 'Unsupported country. Use in or us.' });
+
+        const indicator = 'SL.UEM.TOTL.ZS'; // Unemployment, total (% of total labor force) (modeled ILO estimate)
+        const url = `https://api.worldbank.org/v2/country/${iso3}/indicator/${indicator}?format=json&per_page=70`;
+
+        const body = await fetchJSON(url);
+        const rows = Array.isArray(body) && Array.isArray(body[1]) ? body[1] : [];
+        const series = rows
+            .filter((d) => d && d.value != null)
+            .map((d) => ({ year: Number(d.date), value: typeof d.value === 'number' ? d.value : Number(d.value) }))
+            .sort((a, b) => a.year - b.year);
+        const latest = series.length ? series[series.length - 1] : null;
+
+        res.json({
+            country: iso3,
+            indicator: 'UNEMPLOYMENT_RATE_PERCENT',
+            latest,
+            series,
+            source: 'World Bank SL.UEM.TOTL.ZS'
+        });
+    } catch (error) {
+        console.error('Error in /api/jobs:', error);
+        res.status(500).json({ error: 'Failed to fetch jobs data' });
+    }
+});
+
+
+
+
+// Helper: compute EMA series
+function computeEMA(series, window) {
+    if (!Array.isArray(series) || series.length === 0) return [];
+    const k = 2 / (window + 1);
+    const ema = [];
+    let prev;
+    for (let i = 0; i < series.length; i++) {
+        const v = series[i];
+        if (typeof v !== 'number') { ema.push(null); continue; }
+        if (prev == null) {
+            // seed with SMA of first window if available, else first value
+            const start = Math.max(0, i - window + 1);
+            const slice = series.slice(start, i + 1).filter(x => typeof x === 'number');
+            prev = slice.length > 0 ? slice.reduce((a,b)=>a+b,0) / slice.length : v;
+        }
+        const cur = v * k + prev * (1 - k);
+        ema.push(cur);
+        prev = cur;
+    }
+    return ema;
+}
+
+function computeSeriesSMA(series, window) {
+    const out = new Array(series.length).fill(null);
+    if (!Array.isArray(series) || series.length < window) return out;
+    let sum = 0;
+    let count = 0;
+    for (let i = 0; i < series.length; i++) {
+        const v = series[i];
+        if (typeof v === 'number') { sum += v; count++; }
+        if (i >= window) {
+            const old = series[i - window];
+            if (typeof old === 'number') { sum -= old; count--; }
+        }
+        if (i >= window - 1 && count > 0) {
+            out[i] = sum / count;
+        }
+    }
+    return out;
+}
+
+function pctChange(a, b) {
+    if (a == null || b == null || a === 0) return null;
+    return ((b - a) / a) * 100;
+}
+
+function rangeToPeriod(range) {
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    // Use intervals supported by yahooFinance.historical: '1d', '1wk', '1mo'
+    const map = {
+        '1d': { period1: new Date(now - 7 * day), interval: '1d' },
+        '5d': { period1: new Date(now - 10 * day), interval: '1d' },
+        '1mo': { period1: new Date(now - 35 * day), interval: '1d' },
+        '6mo': { period1: new Date(now - 182 * day), interval: '1d' },
+        '1y': { period1: new Date(now - 365 * day), interval: '1d' },
+        '5y': { period1: new Date(now - 5 * 365 * day), interval: '1wk' },
+        'max': { period1: new Date(1990, 0, 1), interval: '1mo' }
+    };
+    return map[range] || map['1y'];
+}
+
+// Build AI insights for significant moves with simple heuristics
+function buildAiInsights(quotes, news) {
+    const markers = [];
+    const closes = quotes.map(q => q.close);
+    for (let i = 1; i < quotes.length; i++) {
+        const p = closes[i - 1];
+        const c = closes[i];
+        if (typeof p !== 'number' || typeof c !== 'number') continue;
+        const chg = pctChange(p, c);
+        if (chg == null) continue;
+        const abs = Math.abs(chg);
+        const threshold = 4; // percent
+        if (abs >= threshold) {
+            // find nearest news within +/- 2 days
+            const t = quotes[i].date;
+            const tms = new Date(t).getTime();
+            const win = 2 * 24 * 60 * 60 * 1000;
+            const related = (news || []).filter(n => {
+                const nt = (n.providerPublishTime || n.publishedAt || n.pubDate || 0) * 1000;
+                if (!nt) return false;
+                return Math.abs(nt - tms) <= win;
+            });
+            let reason = chg > 0 ? 'Positive catalyst' : 'Negative catalyst';
+            const lex = {
+                up: ['beat', 'upgrade', 'outperform', 'record', 'rally', 'surge', 'partnership', 'approval', 'policy'],
+                down: ['miss', 'downgrade', 'probe', 'lawsuit', 'ban', 'guidance cut', 'layoff', 'weak', 'recall']
+            };
+            for (const n of related) {
+                const t = (n.title || '').toLowerCase();
+                if (chg > 0 && lex.up.some(w => t.includes(w))) { reason = n.title; break; }
+                if (chg < 0 && lex.down.some(w => t.includes(w))) { reason = n.title; break; }
+            }
+            markers.push({ time: quotes[i].date, direction: chg > 0 ? 'uptrend' : 'downtrend', changePct: chg, reason });
+        }
+    }
+    // Overall summaries
+    const summary = {};
+    const byDays = (n) => {
+        const N = Math.max(2, Math.min(quotes.length, n));
+        const a = quotes[quotes.length - N]?.close;
+        const b = quotes[quotes.length - 1]?.close;
+        const pct = pctChange(a, b);
+        return pct;
+    };
+    const w = byDays(5);
+    const y = byDays(252);
+    const fmt = (pct) => pct == null ? 'N/A' : (pct >= 0 ? `rose +${pct.toFixed(1)}%` : `fell ${pct.toFixed(1)}%`);
+    summary['1w'] = w == null ? 'Insufficient data.' : `Last 1 week: ${fmt(w)}.`;
+    summary['1y'] = y == null ? 'Insufficient data.' : `Over the last 1 year, stock ${fmt(y)}.`;
+
+    return { markers, summary };
+}
+
+// Historical and indicators endpoint
+app.get('/api/historical/:symbol', async (req, res) => {
+    try {
+        const raw = (req.params.symbol || '').trim();
+        if (!raw) return res.status(400).json({ error: 'Missing symbol' });
+        const range = (req.query.range || '1y').toString();
+        const { period1, interval } = rangeToPeriod(range);
+        const period2 = new Date();
+
+        // Resolve symbol first (to ensure valid Yahoo symbol)
+        let resolved = (raw || '').trim();
+        let q;
+        try {
+            q = await yahooFinance.quote(resolved);
+            resolved = q?.symbol || resolved;
+        } catch {}
+        if (!q || !q.symbol) {
+            try {
+                const results = await yahooFinance.search(raw);
+                const candidates = Array.isArray(results?.quotes) ? results.quotes : [];
+                const qLower = (raw || '').toLowerCase();
+                const score = (c) => {
+                    let s = 0;
+                    const sn = (c.shortname || '').toLowerCase();
+                    const ln = (c.longname || c.longName || '').toLowerCase();
+                    const sym = (c.symbol || '');
+                    if (sym.toLowerCase() === qLower) s += 100;
+                    if (sn === qLower || ln === qLower) s += 90;
+                    if (sn.includes(qLower) || ln.includes(qLower)) s += 60;
+                    if (c.quoteType === 'EQUITY' || c.typeDisp === 'Equity') s += 20;
+                    return s;
+                };
+                const best = candidates.filter(c => c.symbol).sort((a,b) => score(b) - score(a))[0];
+                if (best?.symbol) {
+                    resolved = best.symbol;
+                    try {
+                        q = await yahooFinance.quote(resolved);
+                    } catch {}
+                }
+            } catch {}
+        }
+
+        // Always fetch historical OHLCV using the stable API
+        const hist = await yahooFinance.historical(resolved, { period1, period2, interval });
+        const quotes = Array.isArray(hist) ? hist.map(h => ({
+            date: (h.date instanceof Date ? h.date : new Date(h.date || Date.now())).toISOString(),
+            open: h.open ?? null,
+            high: h.high ?? null,
+            low: h.low ?? null,
+            close: h.close ?? h.adjClose ?? null,
+            volume: h.volume ?? null
+        })).filter(q => q.close != null) : [];
+
+        // Try to fetch chart events (dividends/splits) separately; ignore failures
+        let chart;
+        try {
+            chart = await yahooFinance.chart(resolved, { period1, period2, interval, events: 'div,split' });
+        } catch (e) {
+            chart = null;
+        }
+
+        if (!quotes.length) return res.json({ symbol: resolved, range, quotes: [], indicators: {}, events: {}, news: [], ai: { markers: [], summary: {} } });
+
+        const closes = quotes.map(q => q.close);
+        const sma50 = computeSeriesSMA(closes, 50);
+        const sma200 = computeSeriesSMA(closes, 200);
+        const ema50 = computeEMA(closes, 50);
+        const ema200 = computeEMA(closes, 200);
+
+        // Events: dividends & splits from chart events if available
+        const dividends = [];
+        const splits = [];
+        try {
+            const ev = chart?.events || chart?.meta?.events || {};
+            const divs = ev.dividends || ev.dividend || {};
+            const spls = ev.splits || ev.split || {};
+            for (const k of Object.keys(divs)) {
+                const d = divs[k];
+                const ts = d?.date || d?.timestamp || Number(k);
+                const amount = d?.amount ?? d?.dividend;
+                if (ts) dividends.push({ time: new Date(ts * (ts > 1e12 ? 1 : 1000)).toISOString(), amount });
+            }
+            for (const k of Object.keys(spls)) {
+                const s = spls[k];
+                const ts = s?.date || s?.timestamp || Number(k);
+                const ratio = s?.numerator && s?.denominator ? `${s.numerator}:${s.denominator}` : s?.splitRatio || null;
+                if (ts) splits.push({ time: new Date(ts * (ts > 1e12 ? 1 : 1000)).toISOString(), ratio });
+            }
+        } catch {}
+
+        // Earnings markers via quoteSummary/earnings module if available
+        const earnings = [];
+        try {
+            const er = await yahooFinance.quoteSummary(resolved, { modules: ['earnings', 'calendarEvents'] });
+            const hist = er?.earnings?.earningsChart?.quarterly || [];
+            for (const e of hist) {
+                const ts = e?.date ? new Date(e.date).toISOString() : null;
+                if (ts) earnings.push({ time: ts, type: 'earnings', text: `Quarter: ${e.date}, surprise: ${e?.surprisePercent != null ? e.surprisePercent + '%' : 'N/A'}` });
+            }
+            const cal = er?.calendarEvents;
+            const dts = [].concat(cal?.earningsDate || []).filter(Boolean);
+            for (const d of dts) {
+                const ts = d.raw ? new Date(d.raw * 1000).toISOString() : (d.fmt ? new Date(d.fmt).toISOString() : null);
+                if (ts) earnings.push({ time: ts, type: 'earnings', text: 'Earnings' });
+            }
+        } catch {}
+
+        // News
+        let news = [];
+        try {
+            const ins = await yahooFinance.insights(resolved);
+            news = Array.isArray(ins?.news) ? ins.news : [];
+        } catch {}
+        if (!news.length) {
+            try {
+                const s = await yahooFinance.search(resolved);
+                news = Array.isArray(s?.news) ? s.news : [];
+            } catch {}
+        }
+
+        const ai = buildAiInsights(quotes, news);
+
+        res.json({
+            symbol: resolved,
+            range,
+            quotes,
+            indicators: {
+                sma50: quotes.map((q, i) => (sma50[i] != null ? { time: q.date, value: sma50[i] } : null)).filter(Boolean),
+                sma200: quotes.map((q, i) => (sma200[i] != null ? { time: q.date, value: sma200[i] } : null)).filter(Boolean),
+                ema50: quotes.map((q, i) => (ema50[i] != null ? { time: q.date, value: ema50[i] } : null)).filter(Boolean),
+                ema200: quotes.map((q, i) => (ema200[i] != null ? { time: q.date, value: ema200[i] } : null)).filter(Boolean)
+            },
+            events: { dividends, splits, earnings },
+            news: (news || []).slice(0, 20).map(n => ({ title: n.title, url: n.link || n.linkUrl || n.url || null, providerPublishTime: n.providerPublishTime || n.publishedAt || n.pubDate || null })),
+            ai
+        });
+    } catch (error) {
+        console.error('Error in /api/historical:', error);
+        res.status(500).json({ error: 'Failed to fetch historical data' });
+    }
+});
+
+// Support /api/historical?symbol=... by redirecting to /api/historical/:symbol
+app.get('/api/historical', (req, res) => {
+    try {
+        const symbol = (req.query.symbol || '').toString().trim();
+        const range = (req.query.range || '').toString().trim();
+        if (!symbol) return res.status(400).json({ error: 'Missing symbol' });
+        const q = range ? `?range=${encodeURIComponent(range)}` : '';
+        return res.redirect(`/api/historical/${encodeURIComponent(symbol)}${q}`);
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to process request' });
     }
 });
 

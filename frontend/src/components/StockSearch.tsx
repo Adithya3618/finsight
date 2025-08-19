@@ -16,6 +16,7 @@ import {
     ClickAwayListener
 } from '@mui/material';
 import axios from 'axios';
+import ChartSection from './ChartSection';
 
 // Define interfaces
 interface StockData {
@@ -156,7 +157,7 @@ const StockSearch: React.FC = () => {
         try {
             const response = await axios.get<StockData>(`${API_URL}/api/stocks/${encodeURIComponent(targetSymbol)}`);
             setStockData(response.data);
-            // Load analysis and chat for the resolved symbol
+            // Load analysis for the resolved symbol
             const resolved = response.data.symbol || targetSymbol;
             loadAnalysis(resolved);
         } catch (err) {
@@ -197,7 +198,9 @@ const StockSearch: React.FC = () => {
         }
     };
 
-    
+    // Effective symbol for chart: prefer resolved analysis symbol, then stockData.symbol, then current input
+    const effectiveSymbol = (analysis?.symbol || stockData?.symbol || symbol || '').trim();
+
     return (
         <Container maxWidth="md">
             <Paper sx={{ p: 3, mt: 4 }}>
@@ -439,6 +442,13 @@ const StockSearch: React.FC = () => {
                             <Typography variant="body2" color="textSecondary">Horizon: {analysis.recommendation.horizon}</Typography>
                             <Typography>Target Range: ${analysis.recommendation.targetRange.min.toFixed(2)} - ${analysis.recommendation.targetRange.max.toFixed(2)}</Typography>
                         </Box>
+
+                        {/* Chart Section */}
+                        {effectiveSymbol && (
+                            <Box sx={{ mt: 4 }}>
+                                <ChartSection symbol={effectiveSymbol} />
+                            </Box>
+                        )}
                     </Box>
                 )}
 
