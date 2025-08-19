@@ -65,6 +65,8 @@ Open http://localhost:3000
 - GET `/api/search/:query` — Autocomplete suggestions (symbol, name, exchange)
 - GET `/api/stocks/:symbolOrName` — Quote by symbol or company name (resolves names like "Apple" to AAPL)
 - GET `/api/analysis/:symbolOrName` — Fundamentals (PE, EPS, market cap), sentiment from headlines, macro/geopolitical signals, SMA20/50, simple next-day prediction, and BUY/HOLD/SELL recommendation with target range and horizon
+- GET `/api/historical/:symbol?range=1d|5d|1mo|6mo|1y|5y|max` — Chart data (price/volume, SMA/EMA overlays, events, AI markers)
+  - Also available as `/api/historical?symbol=:symbol&range=...`
 
 
 ## Runtime Dependencies

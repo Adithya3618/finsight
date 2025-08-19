@@ -114,11 +114,55 @@ Your browser opens at http://localhost:3000
     }
     ```
 
+- GET `/api/analysis/:symbolOrName`
+  - Returns an integrated analysis object that includes:
+    - fundamentals (marketCap, P/E, EPS, dividendYield, beta, profitMargins)
+    - sentiment (score/label and sample headlines)
+    - geopolitics (label and triggered macro signals)
+    - technicals (sma20, sma50, trend)
+    - prediction (simple linear-regression next-day price with a min/max range)
+    - recommendation (BUY/HOLD/SELL + rationale/horizon/targetRange)
+
+- GET `/api/historical/:symbol?range=1d|5d|1mo|6mo|1y|5y|max`
+  - Alternative query form: `/api/historical?symbol=:symbol&range=...`
+  - Returns chart-ready time-series data:
+    ```json
+    {
+      "symbol": "AAPL",
+      "range": "1y",
+      "quotes": [
+        { "date": "2024-08-01T00:00:00.000Z", "open": 193.5, "high": 195.2, "low": 192.1, "close": 194.3, "volume": 54864147 }
+      ],
+      "indicators": {
+        "sma50": [ { "time": "2024-08-01T00:00:00.000Z", "value": 189.1 } ],
+        "sma200": [ ... ],
+        "ema50": [ ... ],
+        "ema200": [ ... ]
+      },
+      "events": {
+        "dividends": [ { "time": "2024-05-10T00:00:00.000Z", "amount": 0.24 } ],
+        "splits": [ { "time": "2020-08-31T00:00:00.000Z", "ratio": "4:1" } ],
+        "earnings": [ { "time": "2024-07-25T00:00:00.000Z", "type": "earnings", "text": "Earnings" } ]
+      },
+      "ai": {
+        "markers": [ { "time": "2024-06-14T00:00:00.000Z", "direction": "uptrend", "changePct": 5.8, "reason": "Upgrade" } ],
+        "summary": { "1w": "Last 1 week: rose +1.2%.", "1y": "Over the last 1 year, stock rose +22.3%." }
+      }
+    }
+    ```
+
 
 ## Frontend Usage
 - Type 2+ characters (e.g., "App") to see suggestions in the dropdown
-- Click a suggestion or press Enter to fetch and display the quote
-- Works with names ("Apple", "Microsoft") and tickers ("AAPL", "MSFT")
+- Click a suggestion or press Enter to fetch and display the quote (works with names and tickers)
+- Scroll down to the Analysis section:
+  - You will see Fundamentals, Sentiment, Geopolitics, Technicals, Prediction, and Recommendation
+  - At the end, the Chart Section renders:
+    - Range toggles: 1D, 1W, 1M, 6M, 1Y, 5Y, Max
+    - Price line with overlays: SMA(50), SMA(200), EMA(50), EMA(200)
+    - Volume bars
+    - Markers for Earnings (E), Dividends (D), Splits (S), and AI-detected significant moves
+    - Click any marker dot to see a brief reason below the chart
 
 
 ## Troubleshooting
