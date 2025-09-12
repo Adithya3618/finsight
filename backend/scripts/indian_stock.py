@@ -21,7 +21,6 @@ def fail(msg):
     sys.exit(0)
 
 
-
 def main():
     if len(sys.argv) < 2:
         return fail("Missing query")
