@@ -6,5 +6,5 @@ const stockSchema = new mongoose.Schema({
     addedAt: { type: Date, default: Date.now },
     isWatched: { type: Boolean, default: true } 
 });
-
+ 
 module.exports = mongoose.model('Stock', stockSchema);
