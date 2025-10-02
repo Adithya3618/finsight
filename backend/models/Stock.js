@@ -7,5 +7,4 @@ const stockSchema = new mongoose.Schema({
     isWatched: { type: Boolean, default: true } 
 });
 
-
 module.exports = mongoose.model('Stock', stockSchema);
