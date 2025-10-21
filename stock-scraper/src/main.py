@@ -5,7 +5,7 @@ import time
 def get_stock_info(symbol: str) -> Stock:
     scraper = YFinanceScraper()
     data = scraper.fetch_data(symbol)
-     
+
     if data:
         return Stock(
             symbol=data['symbol'],
