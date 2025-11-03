@@ -5,6 +5,6 @@ const stockSchema = new mongoose.Schema({
     name: { type: String, required: true },
     addedAt: { type: Date, default: Date.now },
     isWatched: { type: Boolean, default: true } 
-});
+}); 
 
 module.exports = mongoose.model('Stock', stockSchema);
