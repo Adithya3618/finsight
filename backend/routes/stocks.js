@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Stock = require('../models/Stock');
 const yahooFinance = require('yfinance');
-
+ 
 // Get all watchlist stocks
 router.get('/watchlist', async (req, res) => {
     try {
