@@ -5,6 +5,7 @@ class Stock:
         self.symbol = symbol
         self.name = name
         self.price = price
+        
         self.currency = currency
         self.change = change
         self.timestamp = timestamp
