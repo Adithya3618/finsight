@@ -6,7 +6,7 @@ class Stock:
         self.currency = currency
         self.change = change
         self.timestamp = timestamp
-
+ 
     def __str__(self):
         try:
             return (
